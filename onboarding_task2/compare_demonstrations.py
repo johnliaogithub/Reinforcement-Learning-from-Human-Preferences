@@ -13,7 +13,66 @@ def get_latest_dir(path):
         return None
     return max(dirs, key=os.path.getmtime)
 
-# ... (omitted)
+def load_frames(hdf5_path, env):
+    frames = []
+    if not os.path.exists(hdf5_path):
+        print(f"File not found: {hdf5_path}")
+        return frames
+
+    f = h5py.File(hdf5_path, "r")
+    
+    # Use the first valid demo
+    demos = list(f["data"].keys())
+    # Filter for 'demo_' keys just in case
+    demos = [d for d in demos if "demo_" in d]
+    if not demos:
+        print("No demos found in file")
+        return frames
+        
+    ep = demos[0] # Just pick the first one
+    print(f"Loading {ep} from {hdf5_path}")
+
+    # Load model xml
+    model_xml = f[f"data/{ep}"].attrs["model_file"]
+    
+    # Configure env
+    env.reset()
+    xml = env.edit_model_xml(model_xml)
+    env.reset_from_xml_string(xml)
+    env.sim.reset()
+    
+    # Load initial state and actions
+    states = f[f"data/{ep}/states"][()]
+    actions = f[f"data/{ep}/actions"][()]
+    
+    # Set initial state
+    env.sim.set_state_from_flattened(states[0])
+    env.sim.forward()
+    
+    # Pre-action frame
+    obs = env._get_observations()
+    img = obs["agentview_image"]
+    img = cv2.flip(img, 0) # Robosuite images are often upside down
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    frames.append(img)
+    
+    print(f"Rendering {len(actions)} steps...")
+    for action in actions:
+        env.step(action)
+        
+        # Capture image
+        obs = env._get_observations()
+        img = obs["agentview_image"]
+        
+        # Flip image
+        img = cv2.flip(img, 0)
+        
+        # Convert RGB to BGR for CV2
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        frames.append(img)
+        
+    f.close()
+    return frames
 
 def main():
     base_dir = "./trajectories"
@@ -33,7 +92,7 @@ def main():
 
     # Use load_composite_controller_config to get the correct structure for Panda
     controller_config = load_composite_controller_config(
-        controller="OSC_POSE",
+        controller=None,
         robot="Panda"
     )
 
