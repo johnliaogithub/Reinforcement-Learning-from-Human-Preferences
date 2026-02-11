@@ -335,17 +335,18 @@ def collect_human_trajectory(env, device, arm, max_fr, goal_update_mode):
         env.step(env_action)
         env.render()
 
-        # Disabled success-based early exit.
-        # The demo will run until input2action returns None (all objects placed).
-        # if task_completion_hold_count == 0:
-        #     break
-        # if env._check_success():
-        #     if task_completion_hold_count > 0:
-        #         task_completion_hold_count -= 1
-        #     else:
-        #         task_completion_hold_count = 10
-        # else:
-        #     task_completion_hold_count = -1
+        # Also break if we complete the task
+        if task_completion_hold_count == 0:
+            break
+
+        # state machine to check for having a success for 10 consecutive timesteps
+        if env._check_success():
+            if task_completion_hold_count > 0:
+                task_completion_hold_count -= 1
+            else:
+                task_completion_hold_count = 10
+        else:
+            task_completion_hold_count = -1
 
         # limit frame rate if necessary
         if max_fr is not None:
