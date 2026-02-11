@@ -42,26 +42,31 @@ class ProgrammedDevice:
             "Can_main": "bin2"
         }
         self.bin_positions = {
-            "bin1": np.array([0.1, -0.25, 0.85]),
-            "bin2": np.array([0.1, 0.28, 0.85])
+            "bin1": np.array([0.1, -0.25, 0.8]),
+            "bin2": np.array([0.1, 0.28, 0.8])
+        }
+        # Map objects to their visual (ghost) target body for precise placement
+        self.object_visual_map = {
+            "Can_main": "VisualCan_main",
         }
         self.current_obj_idx = 0
         self.state = "APPROACH"
-        self.hover_height = 1.15
+        self.hover_height = 1
         self.grasp_height = 0.835 
-        self.lift_height = 1.3
+        self.lift_height = 1.1 # Lowered from 1.3
         self.error_threshold_pos = 0.05
         self.counter = 0
         self.state_timer = 0
-        self._state_timeout_limit = 50 # 2.5 seconds at 20Hz
+        self._state_timeout_limit = 200 # 40 seconds at 20Hz
 
         self.next_state = {
             "APPROACH": "ORIENT",
             "ORIENT": "DESCEND",
             "DESCEND": "GRASP",
             "GRASP": "LIFT",
-            "LIFT": "MOVE",
-            "MOVE": "RELEASE",
+            "LIFT": "MOVE1",
+            "MOVE1": "MOVE2",
+            "MOVE2": "RELEASE",
             "RELEASE": "APPROACH"
         }
 
@@ -98,7 +103,7 @@ class ProgrammedDevice:
         
         # Timeout Logic
         if self.state_timer > self._state_timeout_limit:
-            print(f"Timeout in state {self.state}. Retrying current object...")
+            print(f"Timeout in state {self.state}. Moving to next action...")
             self.state_timer = 0
             # Retry same object:
             self.state = self.next_state[self.state]
@@ -156,14 +161,35 @@ class ProgrammedDevice:
             target_pos = np.array([obj_pos[0], obj_pos[1], self.lift_height])
             gripper_action = 1
             if eef_pos[2] > self.lift_height - 0.1:
-                self.state = "MOVE"
+                self.state = "MOVE1"
                 self.state_timer = 0
 
-        elif self.state == "MOVE":
-            target_bin = self.object_bin_map[target_obj]
-            bin_pos = self.bin_positions[target_bin]
+        elif self.state == "MOVE1":
+            # Target the ghost can position (VisualCan_main) for precise placement
+            visual_name = self.object_visual_map.get(target_obj)
+            if visual_name:
+                ghost_pos = self.get_object_pos(visual_name)
+            else:
+                target_bin = self.object_bin_map[target_obj]
+                ghost_pos = self.bin_positions[target_bin]
             # Maintain lift height for horizontal move
-            target_pos = np.array([bin_pos[0], bin_pos[1], self.lift_height])
+            target_pos = np.array([ghost_pos[0], ghost_pos[1], self.lift_height])
+            #target_pos = np.array([bin_pos[0], bin_pos[1], bin_pos[2]])
+            gripper_action = 1
+            if np.linalg.norm(target_pos[:2] - eef_pos[:2]) < 0.1:
+                self.state = "MOVE2"
+                self.counter = 0
+                self.state_timer = 0
+        
+        elif self.state == "MOVE2":
+            # Target the ghost can position for descent
+            visual_name = self.object_visual_map.get(target_obj)
+            if visual_name:
+                ghost_pos = self.get_object_pos(visual_name)
+            else:
+                target_bin = self.object_bin_map[target_obj]
+                ghost_pos = self.bin_positions[target_bin]
+            target_pos = np.array([ghost_pos[0], ghost_pos[1], ghost_pos[2]])
             gripper_action = 1
             if np.linalg.norm(target_pos[:2] - eef_pos[:2]) < 0.1:
                 self.state = "RELEASE"
@@ -171,16 +197,24 @@ class ProgrammedDevice:
                 self.state_timer = 0
 
         elif self.state == "RELEASE":
-            target_bin = self.object_bin_map[target_obj]
-            bin_pos = self.bin_positions[target_bin]
-            # Stay at lift height while releasing (drop object)
-            target_pos = np.array([bin_pos[0], bin_pos[1], self.lift_height])
+            visual_name = self.object_visual_map.get(target_obj)
+            if visual_name:
+                ghost_pos = self.get_object_pos(visual_name)
+            else:
+                target_bin = self.object_bin_map[target_obj]
+                ghost_pos = self.bin_positions[target_bin]
+            # Hold above ghost position while releasing
+            target_pos = np.array([ghost_pos[0], ghost_pos[1], ghost_pos[2]])
             gripper_action = -1 # Open
             self.counter += 1
-            if self.counter > 15:
+            if self.counter > 40:
                 self.state = "APPROACH"
                 self.current_obj_idx += 1
                 self.state_timer = 0
+        # --- Debug: Print every 20 steps ---
+        if self.state_timer % 20 == 0:
+            err = np.linalg.norm(target_pos - eef_pos)
+            print(f"[{self.state}] timer={self.state_timer} eef={np.round(eef_pos, 3)} target={np.round(target_pos, 3)} err={err:.4f} gripper={gripper_action}")
         
         # --- Calculate Simulated Inputs (Deltas) ---
         
@@ -301,18 +335,17 @@ def collect_human_trajectory(env, device, arm, max_fr, goal_update_mode):
         env.step(env_action)
         env.render()
 
-        # Also break if we complete the task
-        if task_completion_hold_count == 0:
-            break
-
-        # state machine to check for having a success for 10 consecutive timesteps
-        if env._check_success():
-            if task_completion_hold_count > 0:
-                task_completion_hold_count -= 1  # latched state, decrement count
-            else:
-                task_completion_hold_count = 10  # reset count on first success timestep
-        else:
-            task_completion_hold_count = -1  # null the counter if there's no success
+        # Disabled success-based early exit.
+        # The demo will run until input2action returns None (all objects placed).
+        # if task_completion_hold_count == 0:
+        #     break
+        # if env._check_success():
+        #     if task_completion_hold_count > 0:
+        #         task_completion_hold_count -= 1
+        #     else:
+        #         task_completion_hold_count = 10
+        # else:
+        #     task_completion_hold_count = -1
 
         # limit frame rate if necessary
         if max_fr is not None:
@@ -401,7 +434,7 @@ def gather_demonstrations_as_hdf5(directory, out_dir, env_info):
 if __name__ == "__main__":
     # Hardcoded Arguments replacing argparse
     args_directory = "./trajectories/automated_demonstrations"
-    args_environment = "PickPlace"
+    args_environment = "PickPlaceCan"
     args_robots = ["Panda"]
     args_config = "default"
     args_arm = "right"
