@@ -126,6 +126,14 @@ def main():
     # Playback
     max_len = max(len(frames_auto), len(frames_rand))
     
+    # Video Writer Setup
+    h, w, _ = frames_auto[0].shape
+    video_path = "comparison.mp4"
+    # codec 'mp4v' for .mp4
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(video_path, fourcc, 20.0, (w * 2, h))
+    print(f"Saving video to {video_path}...")
+    
     print("Starting playback. Press 'q' to quit.")
     
     for i in range(max_len):
@@ -137,19 +145,24 @@ def main():
         img_r = frames_rand[idx_r]
         
         # Add labels
-        cv2.putText(img_a, "Automated", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        cv2.putText(img_r, "Random", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        cv2.putText(img_a, "Automated", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.putText(img_r, "Random", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
         
         # Combine
         combined_img = np.concatenate((img_a, img_r), axis=1)
         
+        # Write frame
+        out.write(combined_img)
+        
         cv2.imshow("Comparison", combined_img)
         
-        if cv2.waitKey(50) & 0xFF == ord('q'):
+        if cv2.waitKey(25) & 0xFF == ord('q'):
             break
             
+    out.release()
     cv2.destroyAllWindows()
     env.close()
+    print("Video saved.")
 
 if __name__ == "__main__":
     main()
