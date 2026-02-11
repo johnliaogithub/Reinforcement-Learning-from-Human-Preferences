@@ -4,7 +4,7 @@ A script to collect a batch of human demonstrations.
 The demonstrations can be played back using the `playback_demonstrations_from_hdf5.py` script.
 """
 
-import argparse
+import csv
 import datetime
 import json
 import os
@@ -57,7 +57,12 @@ class ProgrammedDevice:
         self.error_threshold_pos = 0.05
         self.counter = 0
         self.state_timer = 0
-        self._state_timeout_limit = 200 # 40 seconds at 20Hz
+        self.state_timer = 0
+
+        # Timeouts in steps (20Hz control freq)
+        self.timeout_orient = 100 
+        self.timeout_default = 130
+
 
         self.next_state = {
             "APPROACH": "ORIENT",
@@ -67,8 +72,17 @@ class ProgrammedDevice:
             "LIFT": "MOVE1",
             "MOVE1": "MOVE2",
             "MOVE2": "RELEASE",
-            "RELEASE": "APPROACH"
+            "RELEASE": "RETREAT",
+            "RETREAT": "APPROACH"
         }
+
+
+    def reset(self):
+        self.current_obj_idx = 0
+        self.state = "APPROACH"
+        self.state_timer = 0
+        self.counter = 0
+
 
     def start_control(self):
         pass
@@ -102,7 +116,9 @@ class ProgrammedDevice:
         self.state_timer += 1
         
         # Timeout Logic
-        if self.state_timer > self._state_timeout_limit:
+        current_timeout = self.timeout_orient if self.state == "ORIENT" else self.timeout_default
+        
+        if self.state_timer > current_timeout:
             print(f"Timeout in state {self.state}. Moving to next action...")
             self.state_timer = 0
             # Retry same object:
@@ -208,6 +224,24 @@ class ProgrammedDevice:
             gripper_action = -1 # Open
             self.counter += 1
             if self.counter > 40:
+                self.state = "RETREAT"
+                # Do not increment yet, wait until retreat is done
+                self.state_timer = 0
+
+        elif self.state == "RETREAT":
+            # Lift straight up from the drop position
+            visual_name = self.object_visual_map.get(target_obj)
+            if visual_name:
+                ghost_pos = self.get_object_pos(visual_name)
+            else:
+                target_bin = self.object_bin_map[target_obj]
+                ghost_pos = self.bin_positions[target_bin]
+            
+            target_pos = np.array([ghost_pos[0], ghost_pos[1], self.lift_height])
+            gripper_action = -1
+            
+            # Use a threshold to decide when we are 'high enough' to switch
+            if eef_pos[2] > self.lift_height - 0.05:
                 self.state = "APPROACH"
                 self.current_obj_idx += 1
                 self.state_timer = 0
@@ -269,7 +303,7 @@ class ProgrammedDevice:
         return action_dict
 
 
-def collect_human_trajectory(env, device, arm, max_fr, goal_update_mode):
+def collect_human_trajectory(env, device, arm, max_fr, goal_update_mode, episode_num, csv_path):
     """
     Use the device (programmed) to collect a demonstration.
     The rollout trajectory is saved to files in npz format.
@@ -277,9 +311,19 @@ def collect_human_trajectory(env, device, arm, max_fr, goal_update_mode):
 
     env.reset()
     env.render()
+    device.reset()
+
+
 
     task_completion_hold_count = -1  # counter to collect 10 timesteps after reaching goal
     device.start_control()
+
+    # Data logging initialization
+    episode_data = []
+    episode_start_time = time.time()
+    is_success = False
+    
+    file_exists = os.path.isfile(csv_path)
 
     for robot in env.robots:
         robot.print_action_info_dict()
@@ -293,6 +337,7 @@ def collect_human_trajectory(env, device, arm, max_fr, goal_update_mode):
         }
         for robot in env.robots
     ]
+
 
     # Loop until we get a reset from the input or the task completes
     while True:
@@ -335,6 +380,30 @@ def collect_human_trajectory(env, device, arm, max_fr, goal_update_mode):
         env.step(env_action)
         env.render()
 
+        # --- Log Data ---
+        # Capture current state (after step, or before? usually before step for state, but action is for this step. 
+        # The prompt asks for "observations (positions and angles), actions...". 
+        # Device has ge_eef_pos() which gets current sim state. 
+        # Since we just stepped, let's capture the state resulting from the action? 
+        # Or usually (s, a, s', r). Let's capture current EEF pose effectively corresponding to this step.
+        
+        current_eef_pos = device.get_eef_pos()
+        current_eef_quat = device.get_eef_quat()
+        try:
+            current_can_pos = device.get_object_pos("Can_main")
+        except:
+             current_can_pos = np.zeros(3)
+
+        step_record = {
+            "time": time.time(),
+            "eef_pos": current_eef_pos,
+            "eef_quat": current_eef_quat,
+            "can_pos": current_can_pos,
+            "action": env_action
+        }
+        episode_data.append(step_record)
+        # ----------------
+
         # Also break if we complete the task
         if task_completion_hold_count == 0:
             break
@@ -345,6 +414,7 @@ def collect_human_trajectory(env, device, arm, max_fr, goal_update_mode):
                 task_completion_hold_count -= 1
             else:
                 task_completion_hold_count = 10
+                is_success = True
         else:
             task_completion_hold_count = -1
 
@@ -355,8 +425,88 @@ def collect_human_trajectory(env, device, arm, max_fr, goal_update_mode):
             if diff > 0:
                 time.sleep(diff)
 
+    # --- Save to CSV ---
+    duration = time.time() - episode_start_time
+    failure_reason = ""
+    if not is_success:
+        print("Episode not successful.")
+        failure_reason = input("Enter failure type (or press Enter if none): ")
+        
+    # Calculate final distance
+    try:
+        final_can_pos = device.get_object_pos("Can_main")
+        # Target is bin2 for Can_main
+        target_bin_pos = device.bin_positions["bin2"]
+        final_dist = np.linalg.norm(final_can_pos - target_bin_pos)
+    except:
+        final_dist = -1.0
+
+    # Save to the specific CSV path (demo.csv)
+    with open(csv_path, mode='a', newline='') as f:
+        writer = csv.writer(f)
+        
+        # Define headers if new file
+        if not file_exists:
+            headers = ['episode', 'step', 'time', 'duration', 'success', 'failure_type', 
+                       'eef_pos_x', 'eef_pos_y', 'eef_pos_z', 
+                       'eef_quat_w', 'eef_quat_x', 'eef_quat_y', 'eef_quat_z',
+                       'can_pos_x', 'can_pos_y', 'can_pos_z']
+            # Add action headers dynamically
+            if len(episode_data) > 0:
+                ac_dim = len(episode_data[0]['action'])
+                headers.extend([f'action_{i}' for i in range(ac_dim)])
+            writer.writerow(headers)
+
+        # Write data rows
+        for i, record in enumerate(episode_data):
+            row = [
+                episode_num,
+                i,
+                record['time'],
+                duration,
+                is_success,
+                failure_reason,
+                record['eef_pos'][0], record['eef_pos'][1], record['eef_pos'][2],
+                record['eef_quat'][0], record['eef_quat'][1], record['eef_quat'][2], record['eef_quat'][3],
+                record['can_pos'][0], record['can_pos'][1], record['can_pos'][2]
+            ]
+            row.extend(record['action'])
+            writer.writerow(row)
+            
+    print(f"Logged episode {episode_num} to {csv_path}")
+
+    # --- Save to Results CSV ---
+    # Global results file: trajectories/automated_demonstrations/results.csv
+    # We need to construct this path relative to the specific csv_path (which is in a subdir)
+    # csv_path is like .../automated_demonstrations/<timestamp>/demo.csv
+    # so we go up two levels.
+    results_path = os.path.join(os.path.dirname(os.path.dirname(csv_path)), "results.csv")
+    folder_name = os.path.basename(os.path.dirname(csv_path))
+    timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Ensure results file exists strictly (user created it, but just in case)
+    results_exists = os.path.isfile(results_path)
+    
+    with open(results_path, mode='a', newline='') as f:
+        writer = csv.writer(f)
+        # Check if empty (file might exist but be empty if created by `touch`)
+        if not results_exists or os.path.getsize(results_path) == 0:
+             writer.writerow(['id', 'timestamp', 'success', 'failure_type', 'steps', 'duration', 'final_dist'])
+        
+        writer.writerow([
+            f"{folder_name}_{episode_num}",
+            timestamp_str,
+            is_success,
+            failure_reason,
+            len(episode_data),
+            duration,
+            final_dist
+        ])
+    print(f"Logged summary to {results_path}")
+
     # cleanup for end of data collection episodes
     env.close()
+
 
 
 def gather_demonstrations_as_hdf5(directory, out_dir, env_info):
@@ -509,7 +659,12 @@ if __name__ == "__main__":
     os.makedirs(new_dir)
 
     # collect demonstrations
+    episode_count = 0
+    csv_filepath = os.path.join(new_dir, "demo.csv")
+    print(f"Collecting demonstrations... CSV will be saved to {csv_filepath}")
+    
     while True:
-        collect_human_trajectory(env, device, args_arm, args_max_fr, args_goal_update_mode)
+        collect_human_trajectory(env, device, args_arm, args_max_fr, args_goal_update_mode, episode_count, csv_filepath)
         gather_demonstrations_as_hdf5(tmp_directory, new_dir, env_info)
-        break # Exit after one demonstration
+        episode_count += 1
+        # Loop continues indefinitely until interrupted
