@@ -1,0 +1,4 @@
+demo_id,final_x,final_y,final_z,max_z,iou_score,result,steps
+demo_1,-0.0391,-0.0065,0.1502,0.2129,0.0,Grasp Failure,5121
+demo_2,-0.0397,0.0108,0.1634,0.1663,0.0,Grasp Failure,4849
+demo_3,-0.0206,-0.011,0.1684,0.266,0.0,Grasp Failure,4381

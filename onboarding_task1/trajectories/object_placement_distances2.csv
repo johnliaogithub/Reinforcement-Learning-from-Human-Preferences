@@ -1,0 +1,3 @@
+demo_id,total_dist_sum,milk_dist,bread_dist,cereal_dist,can_dist
+demo_1,0.362,0.1188,0.0755,0.0485,0.1193
+demo_2,0.2315,0.1029,0.0404,0.0294,0.0588
